@@ -19,8 +19,9 @@ Runs as a local HTTP server (default port 7888) with a web dashboard.
 5. [Web Dashboard](#5-web-dashboard)
 6. [Terminal Injection](#6-terminal-injection)
 7. [Configuration Reference](#7-configuration-reference)
-8. [Data Storage](#8-data-storage)
-9. [Troubleshooting](#9-troubleshooting)
+8. [API Reference](#8-api-reference)
+9. [Data Storage](#9-data-storage)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -28,21 +29,21 @@ Runs as a local HTTP server (default port 7888) with a web dashboard.
 
 ```bash
 # Start the dashboard (most common usage)
-python3 claude_watchdog.py --web
+python -m claude_watchdog --web
 
 # Open in browser
 open http://localhost:7888
 
 # Single check (no server)
-python3 claude_watchdog.py --once
+python -m claude_watchdog --once
 
 # Drive mode from CLI
-python3 claude_watchdog.py --drive --target "implement feature X" --session abc12345
+python -m claude_watchdog --drive --target "implement feature X" --session abc12345
 ```
 
 ### Requirements
 
-- macOS (uses osascript, pbcopy, Terminal.app integration)
+- macOS (uses CGEvents/Quartz for TTY injection, osascript, Terminal.app)
 - Ollama running locally (`http://localhost:11434`) with `qwen3:14b` model
 - Claude Code sessions in `~/.claude/projects/*/session_*.jsonl`
 - Optional: tmux (for terminal injection into tmux panes)
@@ -182,9 +183,11 @@ From the dashboard's Project Memory panel:
 - **Remove items**: Click the `x` button next to any item
 - **Ask Claude to update memory**: Button that triggers self-summarize on demand (bypasses significance check, still respects cooldown)
 
-API endpoints:
+API endpoints for memory:
 - `POST /api/project_memory` — add/remove items: `{project, category, add: [...], remove: [...]}`
 - `POST /api/memory/summarize/{short_id}` — manual self-summarize trigger
+- `POST /api/memory/extract` — hook endpoint for Stop/PreCompact memory extraction
+- `POST /api/memory/inject` — hook endpoint for SessionStart memory injection
 
 ---
 
@@ -222,7 +225,7 @@ Drive memory is combined with project memory when building instructions, giving 
 
 **From CLI:**
 ```bash
-python3 claude_watchdog.py --drive \
+python -m claude_watchdog --drive \
   --target "implement user auth with JWT" \
   --session abc12345 \
   --check-interval 30 \
@@ -278,9 +281,13 @@ Real-time monitoring UI at `http://localhost:{port}` (default 7888).
 - **Drive panel**: Target editor, progress bar, memory, action log, start/stop buttons
 - **Project Memory panel**: View/add/remove items by category, "Ask Claude to update memory" button
 
-### Auto-refresh
+### Real-time Updates (SSE)
 
-Dashboard refreshes every 10 seconds. Pauses when you're typing in an input field.
+The dashboard uses Server-Sent Events (`GET /api/events`) for real-time updates. The server checks for changes every 3 seconds and only pushes data when session state actually changes (hash-based deduplication). Keepalive comments are sent otherwise.
+
+Uses `ThreadingHTTPServer` to handle concurrent SSE connections alongside normal requests.
+
+Detail panel re-rendering is skipped when nothing meaningful changed, preserving scroll position. A manual Refresh button is available for on-demand fetching.
 
 ---
 
@@ -297,10 +304,10 @@ The watchdog can send text to Claude's terminal. Two methods:
 
 ### Terminal.app (TTY) Sessions
 
-- Copies text to clipboard via `pbcopy`
 - Activates the correct Terminal.app window/tab via osascript
-- Pastes via simulated Cmd+V
-- Limitation: cannot send synthetic Enter key — user may need to press Enter manually
+- Types text and presses Enter via CGEvents (Quartz HID-level keyboard injection)
+- CGEvents are necessary because System Events keystrokes and direct TTY writes don't reach Claude Code's raw terminal input
+- Falls back to clipboard + osascript if CGEvents fail (PermissionError)
 
 ### Process Matching
 
@@ -338,7 +345,39 @@ Sessions are matched to running processes by comparing the session's project pat
 
 ---
 
-## 8. Data Storage
+## 8. API Reference
+
+### GET Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Dashboard HTML |
+| `GET /api/sessions` | All session snapshots (JSON array) |
+| `GET /api/events` | SSE stream — pushes session data on change |
+| `GET /api/drive/{short_id}` | Drive state for a session |
+| `GET /static/*` | Static assets (JS, CSS, favicon) |
+
+### POST Endpoints
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `POST /api/send/{short_id}` | `{text}` | Send text to session's terminal |
+| `POST /api/summarize/{short_id}` | — | On-demand Ollama stall analysis |
+| `POST /api/inject` | `{text, target}` | Inject prompt (target: short_id, index, or "waiting") |
+| `POST /api/inject/waiting` | `{text}` | Inject into most recent waiting session |
+| `POST /api/copy` | `{text}` | Copy text to macOS clipboard |
+| `POST /api/drive/start/{short_id}` | `{target, check_interval?, max_iterations?}` | Start driving a session |
+| `POST /api/drive/stop/{short_id}` | — | Stop driving a session |
+| `POST /api/drive/target/{short_id}` | `{target}` | Update drive target text |
+| `POST /api/drive/hook` | Hook JSON | Claude Code Stop hook for drive evaluation |
+| `POST /api/project_memory` | `{project, category, add, remove}` | Add/remove memory items |
+| `POST /api/memory/summarize/{short_id}` | — | Trigger self-summarize |
+| `POST /api/memory/extract` | Hook JSON | Stop/PreCompact memory extraction hook |
+| `POST /api/memory/inject` | Hook JSON | SessionStart memory injection hook |
+
+---
+
+## 9. Data Storage
 
 All data under `~/.claude/watchdog/`:
 
@@ -356,7 +395,7 @@ Claude Code session files are read from `~/.claude/projects/*/session_*.jsonl` (
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### Ollama not responding
 - Check `curl http://localhost:11434/api/tags` — should list models
@@ -371,7 +410,8 @@ Claude Code session files are read from `~/.claude/projects/*/session_*.jsonl` (
 
 ### Terminal injection not working
 - **Tmux**: Verify `tmux list-panes -a` shows your Claude session
-- **Terminal.app**: Grant Accessibility permissions to Terminal in System Settings → Privacy & Security
+- **Terminal.app (CGEvents)**: Grant Accessibility permissions to Terminal in System Settings → Privacy & Security
+- **TTY not working**: CGEvents require the Terminal window to be frontmost; ensure osascript can activate Terminal
 - **No process found**: Session CWD must match the project path
 
 ### Drive not progressing
