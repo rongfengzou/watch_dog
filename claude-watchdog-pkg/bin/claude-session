@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""CLI tools for interacting with Claude Code sessions via the watchdog API.
+
+Usage:
+    claude_cli sessions                    # list active sessions
+    claude_cli talk <text>                 # send to waiting session
+    claude_cli talk <n> <text>             # send to session #n
+    claude_cli status                      # show session statuses
+    claude_cli summarize <n>               # summarize session #n
+    claude_cli watch                       # live tail of session activity
+
+Requires the watchdog to be running:
+    python3 claude_watchdog.py --web
+"""
+
+import glob
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+BASE = "http://localhost:7889"
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _api_get(path: str) -> dict | list:
+    req = urllib.request.Request(f"{BASE}{path}")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _api_post(path: str, data: dict) -> dict:
+    req = urllib.request.Request(
+        f"{BASE}{path}",
+        data=json.dumps(data).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _short_project(project: str) -> str:
+    if not project:
+        return "?"
+    parts = project.rstrip("/").split("/")
+    return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
+
+def cmd_sessions():
+    """List active sessions."""
+    sessions = _api_get("/api/sessions")
+    live = [s for s in sessions if s.get("status") != "stalled"]
+    if not live:
+        print("No active sessions.")
+        return
+    for i, s in enumerate(live, 1):
+        status = s.get("status", "?")
+        project = _short_project(s.get("project", ""))
+        age = s.get("age_minutes", 0)
+        badge = {"working": "W", "waiting": "?", "idle": "-"}.get(status, " ")
+        sid = s.get("short_id", "?")
+        print(f"  {i}. [{badge}] {project:<20s} {status:<8s} {age:.0f}m  ({sid})")
+
+
+def cmd_status():
+    """Show all sessions including stalled."""
+    sessions = _api_get("/api/sessions")
+    if not sessions:
+        print("No sessions.")
+        return
+    for i, s in enumerate(sessions, 1):
+        status = s.get("status", "?")
+        project = _short_project(s.get("project", ""))
+        age = s.get("age_minutes", 0)
+        badge = {"working": "W", "waiting": "?", "stalled": "!", "idle": "-"}.get(status, " ")
+        sid = s.get("short_id", "?")
+        print(f"  {i}. [{badge}] {project:<20s} {status:<8s} {age:.0f}m  ({sid})")
+
+
+def cmd_talk(args: list[str]):
+    """Send text to a session.
+
+    talk <text>        → send to most recent waiting session
+    talk <n> <text>    → send to session #n
+    """
+    if not args:
+        print("Usage: claude_cli talk [n] <text>")
+        sys.exit(1)
+
+    # Check if first arg is a number (session index)
+    if args[0].isdigit() and len(args) >= 2:
+        target = args[0]
+        text = " ".join(args[1:])
+    else:
+        target = "waiting"
+        text = " ".join(args)
+
+    result = _api_post("/api/inject", {"text": text, "target": target})
+    print(result.get("message", result))
+
+
+def cmd_summarize(args: list[str]):
+    """Summarize a session.
+
+    summarize <n>     → summarize session #n by index
+    summarize <id>    → summarize by short_id
+    """
+    if not args:
+        print("Usage: claude_cli summarize <n|id>")
+        sys.exit(1)
+
+    identifier = args[0]
+    # Resolve index to short_id
+    if identifier.isdigit():
+        sessions = _api_get("/api/sessions")
+        live = [s for s in sessions if s.get("status") != "stalled"]
+        idx = int(identifier) - 1
+        if 0 <= idx < len(live):
+            identifier = live[idx].get("short_id", identifier)
+        else:
+            print(f"Session #{identifier} not found.")
+            sys.exit(1)
+
+    print(f"Summarizing {identifier}... (this may take a minute)")
+    result = _api_post(f"/api/summarize/{identifier}", {})
+    if result.get("ok"):
+        print(f"Done. Saved to: {result.get('file', '?')}")
+    else:
+        print(f"Error: {result.get('error', 'unknown')}")
+
+
+def cmd_watch():
+    """Live-refresh session status every 5 seconds."""
+    print("Watching sessions (Ctrl+C to stop)...\n")
+    try:
+        while True:
+            sessions = _api_get("/api/sessions")
+            live = [s for s in sessions if s.get("status") != "stalled"]
+            # Clear screen
+            print("\033[2J\033[H", end="")
+            print(f"Claude Sessions  ({time.strftime('%H:%M:%S')})\n")
+            if not live:
+                print("  No active sessions.")
+            for i, s in enumerate(live, 1):
+                status = s.get("status", "?")
+                project = _short_project(s.get("project", ""))
+                age = s.get("age_minutes", 0)
+                badge = {"working": "W", "waiting": "?", "idle": "-"}.get(status, " ")
+                print(f"  {i}. [{badge}] {project:<20s} {status:<8s} {age:.0f}m")
+            print(f"\n  {len(live)} active session(s)")
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+def _resolve_session(identifier: str) -> dict | None:
+    """Resolve index, short_id, or project name to a session.
+
+    Accepts:
+      "1"          → session #1 by index
+      "da5ec274"   → by short_id prefix
+      "waiting"    → most recent waiting session
+      "drug"       → match project path containing "drug"
+      "drug/llm"   → match project path containing "drug/llm"
+    """
+    sessions = _api_get("/api/sessions")
+    live = [s for s in sessions if s.get("status") != "stalled"]
+    if identifier == "waiting":
+        waiting = [s for s in live if s.get("status") == "waiting"]
+        return waiting[0] if waiting else None
+    if identifier.isdigit():
+        idx = int(identifier) - 1
+        if 0 <= idx < len(live):
+            return live[idx]
+        return None
+    # Try short_id prefix
+    for s in live:
+        if s.get("short_id", "").startswith(identifier):
+            return s
+    # Try project name match against short name (e.g. "drug/llm", "drug", "click")
+    query = identifier.lower()
+    for s in live:
+        short_name = _short_project(s.get("project", "")).lower()
+        if short_name == query:  # exact match first
+            return s
+    for s in live:
+        short_name = _short_project(s.get("project", "")).lower()
+        if query in short_name:  # substring match
+            return s
+    # Fallback: search all sessions including stalled
+    for s in sessions:
+        if s.get("short_id", "").startswith(identifier):
+            return s
+    for s in sessions:
+        short_name = _short_project(s.get("project", "")).lower()
+        if query in short_name:
+            return s
+    return None
+
+
+def _find_jsonl(session: dict) -> Path | None:
+    """Find the JSONL file for a session."""
+    sid = session.get("session_id", "")
+    if not sid:
+        return None
+    # Search all project dirs for this session
+    pattern = str(CLAUDE_PROJECTS_DIR / "*" / f"{sid}.jsonl")
+    matches = glob.glob(pattern)
+    return Path(matches[0]) if matches else None
+
+
+def _extract_text_from_entry(entry: dict) -> str | None:
+    """Extract readable text from a JSONL entry."""
+    etype = entry.get("type")
+    if etype not in ("assistant", "user"):
+        return None
+    msg = entry.get("message", {})
+    content = msg.get("content", "")
+    role = msg.get("role", etype)
+
+    if isinstance(content, str) and content.strip():
+        return f"\033[1m{role}>\033[0m {content.strip()}"
+
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    parts.append(text)
+            elif btype == "tool_use":
+                name = block.get("name", "?")
+                inp = block.get("input", {})
+                # Show compact tool call
+                if name == "Bash":
+                    cmd = inp.get("command", "")
+                    parts.append(f"[{name}: {cmd[:120]}]")
+                elif name in ("Read", "Write", "Edit"):
+                    fp = inp.get("file_path", "")
+                    parts.append(f"[{name}: {fp}]")
+                elif name == "Grep":
+                    pat = inp.get("pattern", "")
+                    parts.append(f"[{name}: {pat}]")
+                else:
+                    parts.append(f"[{name}]")
+            elif btype == "tool_result":
+                # Skip tool results to reduce noise
+                pass
+        if parts:
+            return f"\033[1m{role}>\033[0m " + "\n  ".join(parts)
+    return None
+
+
+def cmd_live_talk(args: list[str]):
+    """Send text and live-stream Claude's response.
+
+    live_talk <n> <text>    → send to session #n and stream output
+    live_talk <text>        → send to waiting session and stream
+    """
+    if not args:
+        print("Usage: claude_cli live_talk [n] <text>")
+        sys.exit(1)
+
+    if args[0].isdigit() and len(args) >= 2:
+        identifier = args[0]
+        text = " ".join(args[1:])
+    else:
+        identifier = "waiting"
+        text = " ".join(args)
+
+    # Resolve session
+    session = _resolve_session(identifier)
+    if not session:
+        print(f"Session {identifier} not found.")
+        sys.exit(1)
+
+    project = _short_project(session.get("project", ""))
+    sid = session.get("short_id", "?")
+
+    # Find JSONL
+    jsonl_path = _find_jsonl(session)
+    if not jsonl_path:
+        print(f"Cannot find JSONL for session {sid}.")
+        sys.exit(1)
+
+    # Record file position before sending
+    pre_size = jsonl_path.stat().st_size
+
+    # Send the text
+    target = sid
+    result = _api_post("/api/inject", {"text": text, "target": target})
+    ok = "Failed" not in result.get("message", "") and "No " not in result.get("message", "")
+    if not ok:
+        print(f"Send failed: {result.get('message', result)}")
+        sys.exit(1)
+
+    print(f"\033[90mSent to {project} ({sid}). Streaming response...\033[0m")
+    print(f"\033[90m{'─' * 60}\033[0m")
+
+    # Stream new entries as they appear
+    file_pos = pre_size
+    idle_count = 0
+    last_entry_time = time.time()
+
+    try:
+        while True:
+            try:
+                current_size = jsonl_path.stat().st_size
+            except OSError:
+                break
+
+            if current_size > file_pos:
+                idle_count = 0
+                last_entry_time = time.time()
+                with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(file_pos)
+                    new_data = f.read()
+                    file_pos = f.tell()
+
+                for line in new_data.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    display = _extract_text_from_entry(entry)
+                    if display:
+                        print(display)
+
+                    # Check if Claude finished this turn
+                    if entry.get("type") == "assistant":
+                        msg = entry.get("message", {})
+                        stop = msg.get("stop_reason")
+                        if stop == "end_turn":
+                            print(f"\033[90m{'─' * 60}\033[0m")
+                            print(f"\033[90mClaude finished. ({project})\033[0m")
+                            return
+            else:
+                idle_count += 1
+                # Timeout after 5 min of no output
+                if time.time() - last_entry_time > 300:
+                    print(f"\n\033[90mNo output for 5 min. Stopping stream.\033[0m")
+                    return
+                # Show a dot every 10s to indicate we're waiting
+                if idle_count % 10 == 0:
+                    elapsed = int(time.time() - last_entry_time)
+                    print(f"\033[90m  ... waiting ({elapsed}s)\033[0m", end="\r")
+
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n\033[90mStream stopped.\033[0m")
+
+
+def cmd_history(args: list[str]):
+    """Show the last user question and Claude's response.
+
+    history <n>    → last exchange from session #n
+    history        → last exchange from most recent session
+    """
+    if args:
+        identifier = args[0]
+    else:
+        identifier = "1"
+
+    session = _resolve_session(identifier)
+    if not session:
+        print(f"Session {identifier} not found.")
+        sys.exit(1)
+
+    project = _short_project(session.get("project", ""))
+    sid = session.get("short_id", "?")
+    jsonl_path = _find_jsonl(session)
+    if not jsonl_path:
+        print(f"Cannot find JSONL for session {sid}.")
+        sys.exit(1)
+
+    # Read tail of JSONL
+    tail_bytes = 100 * 1024  # 100KB
+    size = jsonl_path.stat().st_size
+    offset = max(0, size - tail_bytes)
+    entries = []
+    with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+        if offset > 0:
+            f.seek(offset)
+            f.readline()
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Find the last user message and everything after it (Claude's response)
+    meaningful = [e for e in entries if e.get("type") in ("user", "assistant")]
+    if not meaningful:
+        print("No conversation history found.")
+        return
+
+    # Walk backwards to find the last user→assistant exchange
+    last_user_idx = None
+    for i in range(len(meaningful) - 1, -1, -1):
+        if meaningful[i].get("type") == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx is None:
+        print("No user message found.")
+        return
+
+    print(f"\033[90m{'─' * 60}\033[0m")
+    print(f"\033[90m{project} ({sid})\033[0m")
+    print(f"\033[90m{'─' * 60}\033[0m")
+
+    # Show the user message
+    user_entry = meaningful[last_user_idx]
+    user_text = _extract_text_from_entry(user_entry)
+    if user_text:
+        print(f"\n\033[1;34m{user_text}\033[0m\n")
+
+    # Show all assistant messages after it
+    assistant_entries = meaningful[last_user_idx + 1:]
+    if not assistant_entries:
+        print("\033[90m(No response yet)\033[0m")
+        return
+
+    for entry in assistant_entries:
+        display = _extract_text_from_entry(entry)
+        if display:
+            print(display)
+
+    print(f"\n\033[90m{'─' * 60}\033[0m")
+
+
+COMMANDS = {
+    "sessions": (cmd_sessions, "List active sessions"),
+    "ls": (cmd_sessions, "List active sessions (alias)"),
+    "status": (cmd_status, "Show all sessions including stalled"),
+    "talk": (cmd_talk, "Send text to a session"),
+    "t": (cmd_talk, "Send text (alias)"),
+    "live_talk": (cmd_live_talk, "Send and live-stream response"),
+    "lt": (cmd_live_talk, "Live talk (alias)"),
+    "history": (cmd_history, "Last question & response"),
+    "h": (cmd_history, "History (alias)"),
+    "summarize": (cmd_summarize, "Summarize a session"),
+    "sum": (cmd_summarize, "Summarize (alias)"),
+    "watch": (cmd_watch, "Live session monitor"),
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print("Claude Code CLI — talk to your Claude sessions\n")
+        print("Usage: claude_cli <command> [args]\n")
+        print("Commands:")
+        seen = set()
+        for name, (fn, desc) in COMMANDS.items():
+            if fn not in seen:
+                seen.add(fn)
+                aliases = [n for n, (f, _) in COMMANDS.items() if f == fn]
+                label = ", ".join(aliases)
+                print(f"  {label:<20s} {desc}")
+        print("\nExamples:")
+        print("  claude_cli ls                    # list sessions")
+        print("  claude_cli talk hello            # send to waiting session")
+        print("  claude_cli talk 1 continue       # send to session #1")
+        print("  claude_cli lt 1 yes proceed      # send & stream response")
+        print("  claude_cli lt do the thing       # send to waiting & stream")
+        print("  claude_cli sum 1                 # summarize session #1")
+        print("  claude_cli watch                 # live monitor")
+        sys.exit(0)
+
+    cmd_name = sys.argv[1]
+    cmd_args = sys.argv[2:]
+
+    if cmd_name not in COMMANDS:
+        print(f"Unknown command: {cmd_name}")
+        print("Run 'claude_cli help' for usage.")
+        sys.exit(1)
+
+    fn, _ = COMMANDS[cmd_name]
+    try:
+        if fn in (cmd_talk, cmd_summarize, cmd_live_talk, cmd_history):
+            fn(cmd_args)
+        else:
+            fn()
+    except (urllib.error.URLError, OSError) as e:
+        print(f"Error: Cannot connect to watchdog at {BASE}")
+        print(f"Is it running? Start with: python3 claude_watchdog.py --web")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

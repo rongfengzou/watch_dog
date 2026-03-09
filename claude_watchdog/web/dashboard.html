@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Watchdog</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="header">
+  <img src="/static/favicon.png" alt="" style="width:28px;height:28px;border-radius:6px">
+  <h1>Claude Watchdog</h1>
+  <div class="stats" id="stats"></div>
+  <div class="refresh-info">
+    <button onclick="doRefresh()">Refresh</button>
+  </div>
+</div>
+<div class="container">
+  <div class="col col-list">
+    <div class="session-list" id="session-list"></div>
+  </div>
+  <div class="col col-detail">
+    <div class="detail" id="detail">
+      <div class="detail-empty">Select a session to view details</div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

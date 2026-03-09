@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""CLI for interacting with local Ollama models (Qwen, etc.).
+
+Usage:
+    ollama_cli ask <text>                  # ask qwen3:32b (default)
+    ollama_cli ask -m qwen3:14b <text>     # ask a specific model
+    ollama_cli chat                        # interactive chat session
+    ollama_cli chat -m qwen3:14b           # chat with specific model
+    ollama_cli models                      # list available models
+    ollama_cli run <file> [args]           # feed a file as prompt
+    ollama_cli pipe                        # read stdin, send to model
+
+Examples:
+    ollama_cli ask "explain SMARTS pattern [NH2]"
+    echo "summarize this" | ollama_cli pipe
+    ollama_cli run prompt.txt
+    ollama_cli chat -s "You are a chemistry expert"
+"""
+
+import json
+import sys
+import urllib.error
+import urllib.request
+
+BASE = "http://localhost:11434"
+DEFAULT_MODEL = "qwen3:32b"
+
+
+def _api_post(path: str, data: dict, stream: bool = False) -> dict | None:
+    req = urllib.request.Request(
+        f"{BASE}{path}",
+        data=json.dumps(data).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    if stream:
+        resp = urllib.request.urlopen(req, timeout=300)
+        try:
+            for line in resp:
+                line = line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    print(content, end="", flush=True)
+                if chunk.get("done"):
+                    print()
+                    return chunk
+        finally:
+            resp.close()
+        return None
+    else:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            return json.loads(resp.read().decode())
+
+
+def _api_get(path: str) -> dict:
+    req = urllib.request.Request(f"{BASE}{path}")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _parse_model_flag(args: list[str]) -> tuple[str, list[str]]:
+    """Extract -m/--model flag from args, return (model, remaining_args)."""
+    model = DEFAULT_MODEL
+    remaining = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-m", "--model") and i + 1 < len(args):
+            model = args[i + 1]
+            i += 2
+        else:
+            remaining.append(args[i])
+            i += 1
+    return model, remaining
+
+
+def _parse_system_flag(args: list[str]) -> tuple[str | None, list[str]]:
+    """Extract -s/--system flag from args."""
+    system = None
+    remaining = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-s", "--system") and i + 1 < len(args):
+            system = args[i + 1]
+            i += 2
+        else:
+            remaining.append(args[i])
+            i += 1
+    return system, remaining
+
+
+def _parse_no_think_flag(args: list[str]) -> tuple[bool, list[str]]:
+    """Extract --no-think flag from args."""
+    no_think = False
+    remaining = []
+    for arg in args:
+        if arg in ("--no-think", "--fast", "-f"):
+            no_think = True
+        else:
+            remaining.append(arg)
+    return no_think, remaining
+
+
+def _apply_no_think(prompt: str, no_think: bool) -> str:
+    """Append /no_think to prompt if flag is set."""
+    if no_think:
+        return prompt + " /no_think"
+    return prompt
+
+
+def cmd_models():
+    """List available models."""
+    data = _api_get("/api/tags")
+    models = data.get("models", [])
+    if not models:
+        print("No models found.")
+        return
+    for m in models:
+        name = m["name"]
+        size_gb = m.get("size", 0) / 1e9
+        params = m.get("details", {}).get("parameter_size", "?")
+        quant = m.get("details", {}).get("quantization_level", "?")
+        default = " (default)" if name == DEFAULT_MODEL else ""
+        print(f"  {name:<20s} {params:<8s} {quant:<8s} {size_gb:.1f}GB{default}")
+
+
+def cmd_ask(args: list[str]):
+    """Send a one-shot question and stream the response."""
+    model, args = _parse_model_flag(args)
+    system, args = _parse_system_flag(args)
+    no_think, args = _parse_no_think_flag(args)
+
+    if not args:
+        print("Usage: ollama_cli ask [-m model] [-s system_prompt] [--no-think] <text>")
+        sys.exit(1)
+
+    prompt = _apply_no_think(" ".join(args), no_think)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    _api_post("/api/chat", {"model": model, "messages": messages, "stream": True}, stream=True)
+
+
+def cmd_chat(args: list[str]):
+    """Interactive multi-turn chat."""
+    model, args = _parse_model_flag(args)
+    system, args = _parse_system_flag(args)
+    no_think, _ = _parse_no_think_flag(args)
+
+    mode_label = f" (no-think)" if no_think else ""
+    print(f"Chat with {model}{mode_label} (Ctrl+C or 'quit' to exit)\n")
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+        print(f"  System: {system}\n")
+
+    try:
+        while True:
+            try:
+                user_input = input("\033[1;34myou>\033[0m ")
+            except EOFError:
+                break
+            if not user_input.strip():
+                continue
+            if user_input.strip().lower() in ("quit", "exit", "q"):
+                break
+
+            content = _apply_no_think(user_input, no_think)
+            messages.append({"role": "user", "content": content})
+            print("\033[1;32mai>\033[0m ", end="", flush=True)
+            result = _api_post(
+                "/api/chat",
+                {"model": model, "messages": messages, "stream": True},
+                stream=True,
+            )
+            if result:
+                resp = result.get("message", {}).get("content", "")
+                if resp:
+                    messages.append({"role": "assistant", "content": resp})
+    except KeyboardInterrupt:
+        print("\n")
+
+
+def cmd_run(args: list[str]):
+    """Read a file and send its content as prompt."""
+    model, args = _parse_model_flag(args)
+    system, args = _parse_system_flag(args)
+    no_think, args = _parse_no_think_flag(args)
+
+    if not args:
+        print("Usage: ollama_cli run [-m model] [-s system_prompt] [--no-think] <file>")
+        sys.exit(1)
+
+    filepath = args[0]
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"File not found: {filepath}")
+        sys.exit(1)
+
+    # If extra args after filename, treat as instruction prefix
+    if len(args) > 1:
+        instruction = " ".join(args[1:])
+        prompt = f"{instruction}\n\n{content}"
+    else:
+        prompt = content
+
+    prompt = _apply_no_think(prompt, no_think)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    _api_post("/api/chat", {"model": model, "messages": messages, "stream": True}, stream=True)
+
+
+def cmd_pipe(args: list[str]):
+    """Read from stdin and send to model."""
+    model, args = _parse_model_flag(args)
+    system, args = _parse_system_flag(args)
+    no_think, args = _parse_no_think_flag(args)
+
+    stdin_content = sys.stdin.read()
+    if not stdin_content.strip():
+        print("No input from stdin.")
+        sys.exit(1)
+
+    # If args remain, use as instruction
+    if args:
+        instruction = " ".join(args)
+        prompt = f"{instruction}\n\n{stdin_content}"
+    else:
+        prompt = stdin_content
+
+    prompt = _apply_no_think(prompt, no_think)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    _api_post("/api/chat", {"model": model, "messages": messages, "stream": True}, stream=True)
+
+
+COMMANDS = {
+    "ask": (cmd_ask, "One-shot question (streamed)"),
+    "a": (cmd_ask, "Ask (alias)"),
+    "chat": (cmd_chat, "Interactive multi-turn chat"),
+    "c": (cmd_chat, "Chat (alias)"),
+    "models": (cmd_models, "List available models"),
+    "ls": (cmd_models, "List models (alias)"),
+    "run": (cmd_run, "Send file content as prompt"),
+    "pipe": (cmd_pipe, "Read stdin, send to model"),
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print("Ollama CLI — talk to local LLMs\n")
+        print("Usage: ollama_cli <command> [args]\n")
+        print("Commands:")
+        seen = set()
+        for name, (fn, desc) in COMMANDS.items():
+            if fn not in seen:
+                seen.add(fn)
+                aliases = [n for n, (f, _) in COMMANDS.items() if f == fn]
+                label = ", ".join(aliases)
+                print(f"  {label:<20s} {desc}")
+        print("\nFlags (all commands):")
+        print(f"  -m, --model <name>   Model to use (default: {DEFAULT_MODEL})")
+        print("  -s, --system <text>  System prompt")
+        print("  -f, --no-think       Disable thinking mode (faster, less tokens)")
+        print("\nExamples:")
+        print('  ollama_cli ask "what is pKa"')
+        print('  ollama_cli ask -f "what is pKa"              # fast, no thinking')
+        print('  ollama_cli ask -m qwen3:14b "hello"')
+        print('  ollama_cli chat -s "You are a chemistry expert"')
+        print('  ollama_cli chat -f                            # fast chat')
+        print("  ollama_cli run prompt.txt")
+        print('  echo "summarize" | ollama_cli pipe -f')
+        sys.exit(0)
+
+    cmd_name = sys.argv[1]
+    cmd_args = sys.argv[2:]
+
+    if cmd_name not in COMMANDS:
+        print(f"Unknown command: {cmd_name}")
+        print("Run 'ollama_cli help' for usage.")
+        sys.exit(1)
+
+    fn, _ = COMMANDS[cmd_name]
+    try:
+        if fn == cmd_models:
+            fn()
+        else:
+            fn(cmd_args)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"Error: Cannot connect to Ollama at {BASE}")
+        print("Is it running? Start with: ollama serve")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
