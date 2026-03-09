@@ -117,7 +117,7 @@ def add_project_memory_items(
     """Add items to structured project memory.
 
     *items* maps category -> list of strings, e.g.
-    {"results": ["ecoul MAE=0.85"], "constraints": ["do not change flag X"]}
+    {"results": ["test accuracy=95%"], "constraints": ["do not use method X"]}
     """
     mem = load_project_memory(project)
     for cat, entries in items.items():

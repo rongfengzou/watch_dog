@@ -11,10 +11,10 @@ Usage:
     ollama_cli pipe                        # read stdin, send to model
 
 Examples:
-    ollama_cli ask "explain SMARTS pattern [NH2]"
+    ollama_cli ask "explain the Observer design pattern"
     echo "summarize this" | ollama_cli pipe
     ollama_cli run prompt.txt
-    ollama_cli chat -s "You are a chemistry expert"
+    ollama_cli chat -s "You are a helpful coding assistant"
 """
 
 import json
@@ -279,10 +279,10 @@ def main():
         print("  -s, --system <text>  System prompt")
         print("  -f, --no-think       Disable thinking mode (faster, less tokens)")
         print("\nExamples:")
-        print('  ollama_cli ask "what is pKa"')
-        print('  ollama_cli ask -f "what is pKa"              # fast, no thinking')
+        print('  ollama_cli ask "explain recursion"')
+        print('  ollama_cli ask -f "explain recursion"        # fast, no thinking')
         print('  ollama_cli ask -m qwen3:14b "hello"')
-        print('  ollama_cli chat -s "You are a chemistry expert"')
+        print('  ollama_cli chat -s "You are a helpful coding assistant"')
         print('  ollama_cli chat -f                            # fast chat')
         print("  ollama_cli run prompt.txt")
         print('  echo "summarize" | ollama_cli pipe -f')

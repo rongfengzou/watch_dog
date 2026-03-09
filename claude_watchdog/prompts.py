@@ -54,7 +54,7 @@ Respond in STRICT JSON (no markdown, no explanation outside JSON):
 {{
   "status": "done" | "not_done" | "blocked",
   "progress_pct": <0-100>,
-  "memory_add": ["goal X: achieved, MAE=0.26"],
+  "memory_add": ["goal X: achieved, accuracy=95%"],
   "memory_remove": ["outdated status"],
   "next_instruction": "what to tell Claude next (empty if done)",
   "reasoning": "1-2 sentence explanation"
@@ -81,7 +81,7 @@ MESSAGE:
 {message}
 
 Output ONLY a JSON object like this example, nothing else:
-{{"add_results":["MAE improved to 0.19"],"add_decisions":[],"add_constraints":["do not use grid Coulomb: wrong 1/r2 exponent"],"add_working_config":[],"remove_results":["MAE was 0.26"],"remove_decisions":[],"remove_constraints":[],"remove_working_config":[]}}
+{{"add_results":["test accuracy improved to 95%"],"add_decisions":[],"add_constraints":["do not use method X: fails on edge case Y"],"add_working_config":[],"remove_results":["accuracy was 88%"],"remove_decisions":[],"remove_constraints":[],"remove_working_config":[]}}
 """
 
 SIGNIFICANCE_PROMPT = """\
