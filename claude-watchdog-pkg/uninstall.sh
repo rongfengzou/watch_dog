@@ -29,7 +29,14 @@ for cmd in claude-watchdog claude-session ollama-cli; do
     fi
 done
 
+# Remove installed package
+PKG_DIR="$HOME/.local/lib/claude_watchdog"
+if [ -d "$PKG_DIR" ]; then
+    echo "Removing $PKG_DIR"
+    rm -rf "$PKG_DIR"
+fi
+
 echo ""
-echo "Binaries removed. Data preserved at ~/.claude/watchdog/"
+echo "Binaries and package removed. Data preserved at ~/.claude/watchdog/"
 echo "To remove data too:  rm -rf ~/.claude/watchdog/"
 echo "To remove hooks:     edit ~/.claude/settings.json"

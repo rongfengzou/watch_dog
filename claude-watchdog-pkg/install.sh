@@ -11,7 +11,7 @@ echo "=== Claude Watchdog Installer ==="
 echo ""
 
 # --- 1. Check dependencies ---
-echo "[1/5] Checking dependencies..."
+echo "[1/6] Checking dependencies..."
 
 # Python 3.8+
 if ! command -v python3 &>/dev/null; then
@@ -60,8 +60,19 @@ fi
 
 echo ""
 
-# --- 2. Install binaries ---
-echo "[2/5] Installing to $INSTALL_DIR ..."
+# --- 2. Install package ---
+echo "[2/6] Installing package..."
+
+PKG_DIR="$HOME/.local/lib/claude_watchdog"
+echo "  Installing package to $PKG_DIR"
+rm -rf "$PKG_DIR"
+mkdir -p "$(dirname "$PKG_DIR")"
+cp -r "$SCRIPT_DIR/../claude_watchdog" "$PKG_DIR"
+
+echo ""
+
+# --- 3. Install binaries ---
+echo "[3/6] Installing to $INSTALL_DIR ..."
 
 for cmd in claude-watchdog claude-session ollama-cli; do
     if [ -f "$INSTALL_DIR/$cmd" ]; then
@@ -75,15 +86,15 @@ done
 
 echo ""
 
-# --- 3. Create data directories ---
-echo "[3/5] Creating data directories..."
+# --- 4. Create data directories ---
+echo "[4/6] Creating data directories..."
 mkdir -p "$HOME/.claude/watchdog/drives"
 mkdir -p "$HOME/.claude/watchdog/project_memory"
 echo "  ~/.claude/watchdog/ ready"
 echo ""
 
-# --- 4. Configure hooks ---
-echo "[4/5] Configuring Claude Code hooks..."
+# --- 5. Configure hooks ---
+echo "[5/6] Configuring Claude Code hooks..."
 
 SETTINGS="$HOME/.claude/settings.json"
 if [ ! -f "$SETTINGS" ]; then
@@ -178,8 +189,8 @@ PYEOF
 
 echo ""
 
-# --- 5. Create launchd plist (optional auto-start) ---
-echo "[5/5] Optional: auto-start on login"
+# --- 6. Create launchd plist (optional auto-start) ---
+echo "[6/6] Optional: auto-start on login"
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/com.claude.watchdog.plist"
@@ -194,7 +205,6 @@ cat > "$PLIST" << EOF
     <string>com.claude.watchdog</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$(command -v python3)</string>
         <string>$INSTALL_DIR/claude-watchdog</string>
         <string>--web</string>
         <string>--port</string>
@@ -212,6 +222,8 @@ cat > "$PLIST" << EOF
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>PYTHONPATH</key>
+        <string>$HOME/.local/lib</string>
     </dict>
 </dict>
 </plist>
