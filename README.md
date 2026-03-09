@@ -1,4 +1,8 @@
-# Claude Watchdog — User Manual
+<p align="center">
+  <img src="icon.png" width="128" height="128" alt="Claude Watchdog">
+</p>
+
+# Claude Watchdog
 
 A service that monitors Claude Code sessions, maintains persistent memory across sessions, detects stalls, and can autonomously drive Claude toward a goal.
 
