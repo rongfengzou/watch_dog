@@ -191,6 +191,62 @@ def match_session_to_process(
     return None
 
 
+def _send_via_cgevents(tty_path: str, text: str) -> tuple[bool, str]:
+    """Inject text + Enter into a Terminal.app tab via macOS CGEvents.
+
+    CGEvents operate at the HID level, so keystrokes flow through
+    Terminal.app's PTY to the child process (Claude Code) even in
+    raw terminal mode.
+    """
+    import time
+
+    # Step 1: activate Terminal and select the correct tab
+    activate_script = f'''
+tell application "Terminal"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty_path}" then
+        set selected of t to true
+        set index of w to 1
+        return "ok"
+      end if
+    end repeat
+  end repeat
+  return "tab not found"
+end tell
+'''
+    res = subprocess.run(
+        ["osascript", "-e", activate_script],
+        capture_output=True, text=True, timeout=10,
+    )
+    if "tab not found" in res.stdout:
+        return False, f"Terminal tab not found for {tty_path}"
+    time.sleep(0.3)
+
+    # Step 2: type text via CGEvents
+    import Quartz
+
+    for ch in text:
+        ev_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_down, len(ch), ch)
+        ev_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_up, len(ch), ch)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_up)
+        time.sleep(0.005)
+
+    time.sleep(0.1)
+
+    # Step 3: press Return (key code 36)
+    ev_down = Quartz.CGEventCreateKeyboardEvent(None, 36, True)
+    ev_up = Quartz.CGEventCreateKeyboardEvent(None, 36, False)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_down)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_up)
+
+    return True, f"Sent to Terminal {tty_path}"
+
+
 def send_keys_to_target(target: dict, text: str) -> tuple[bool, str]:
     """Send keystrokes to a tmux pane or TTY. Returns (ok, message)."""
     if target["type"] == "tmux":
@@ -218,67 +274,14 @@ def send_keys_to_target(target: dict, text: str) -> tuple[bool, str]:
             return False, str(e)
 
     elif target["type"] == "tty":
-        # Strategy: copy text to clipboard, activate the Terminal tab,
-        # then use System Events to paste (Cmd+V) and press Enter.
+        # Use CGEvents to inject keystrokes at HID level.
+        # System Events / direct TTY write don't reach Claude Code's
+        # raw terminal input; CGEvents go through the PTY properly.
         tty_path = target["target"]
-
-        # Step 1: copy text to clipboard
-        _copy_to_clipboard(text)
-
-        # Step 2: activate Terminal and select the correct tab
-        activate_script = f'''
-tell application "Terminal"
-  activate
-  repeat with w in windows
-    repeat with t in tabs of w
-      if tty of t is "{tty_path}" then
-        set selected of t to true
-        set index of w to 1
-        return "ok"
-      end if
-    end repeat
-  end repeat
-  return "tab not found"
-end tell
-'''
         try:
-            res = subprocess.run(
-                ["osascript", "-e", activate_script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "tab not found" in res.stdout:
-                return False, f"Terminal tab not found for {tty_path}"
+            ok, msg = _send_via_cgevents(tty_path, text)
+            return ok, msg
         except Exception as e:
-            return False, f"Failed to activate Terminal: {e}"
-
-        # Step 3: paste via System Events Cmd+V
-        paste_script = '''
-tell application "System Events"
-  tell process "Terminal"
-    keystroke "v" using command down
-  end tell
-end tell
-'''
-        try:
-            res = subprocess.run(
-                ["osascript", "-e", paste_script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if res.returncode == 0:
-                return True, f"Pasted to Terminal {tty_path} — press Enter to submit"
-            # System Events blocked — clipboard-only
-            logger.warning("System Events blocked: %s", res.stderr.strip())
-            return (
-                True,
-                f"Copied to clipboard & Terminal activated. "
-                f"Press Cmd+V then Enter ({tty_path})",
-            )
-        except Exception as e:
-            logger.warning("System Events error: %s", e)
-            return (
-                True,
-                f"Copied to clipboard & Terminal activated. "
-                f"Press Cmd+V then Enter ({tty_path})",
-            )
+            return False, f"CGEvent send failed: {e}"
 
     return False, "unknown target type"
