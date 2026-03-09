@@ -5,6 +5,7 @@ let promptTexts = {};  // shortId -> user-typed text (persists across renders)
 let promptInited = {}; // shortId -> true if we already pre-filled once
 let driveTargetTexts = {};  // shortId -> user-typed drive target text
 let driveLogOpen = {};  // shortId -> bool
+let prevDetailHash = {};  // shortId -> hash of detail content, skip re-render if unchanged
 
 function esc(s) {
   const d = document.createElement('div');
@@ -80,7 +81,7 @@ function renderList() {
     const badge = isDriving ? 'driving' : s.status === 'stalled' ? shortStallType(s.stall_type) : s.status;
     const typeIcon = s.process_type === 'tmux' ? ' [tmux]' : s.process_type === 'tty' ? ' [tty]' : '';
     return `<div class="s-row${sel}" onclick="selectSession('${s.short_id}')">
-      <span class="badge badge-${badgeStatus}">${esc(badge)}</span>
+      <span class="badge badge-${badgeStatus}">[${esc(badge)}]</span>
       <div class="s-info">
         <div class="s-project" title="${esc(s.project)}">${esc(proj)}</div>
         <div class="s-meta">${esc(s.slug || s.short_id)}${s.model ? ' · ' + esc(s.model) : ''}${typeIcon}</div>
@@ -195,9 +196,15 @@ function renderDetail() {
     <div id="send-status" style="display:none;font-size:12px;margin-top:6px;padding:4px 8px;border-radius:4px"></div>
   </div>`;
 
+  // Build a hash of content that matters — skip re-render if unchanged
+  const detailHash = s.status + ':' + s.messages.length + ':' + s.drive_state + ':' + s.drive_iteration + ':' + (s.resume_content ? s.resume_content.length : 0) + ':' + (s.messages.length ? s.messages[s.messages.length-1].text : '') + ':' + (resumeOpen[s.short_id]||0) + ':' + (driveLogOpen[s.short_id]||0) + ':' + (projectMemoryOpen[s.project]||0);
+  const isNewContent = detailHash !== prevDetailHash[s.short_id];
+  if (!isNewContent) return;  // nothing changed, keep scroll position
+  prevDetailHash[s.short_id] = detailHash;
+
   el.innerHTML = `
     <div class="detail-header">
-      <span class="badge badge-${s.status}">${esc(badge)}</span>
+      <span class="badge badge-${s.status}">[${esc(badge)}]</span>
       <div class="d-title">
         <h2>${esc(proj)}</h2>
         <div class="d-sub">${esc(s.session_id)}</div>
